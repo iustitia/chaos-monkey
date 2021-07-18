@@ -28,42 +28,56 @@ def serve_metrics():
 logger = get_logger(__name__)
 
 
-if __name__ == "__main__":
+class ChaosMonkey:
 
-    c = Counter('killed_pods', 'Pods killed by Chaos Monkey', ['podlabel'])
+    def __init__(self):
+        self.c = Counter('killed_pods', 'Pods killed by Chaos Monkey', ['podlabel'])
 
-    interval = os.getenv('interval')
-    namespace = os.getenv('namespace')
+        self.interval = os.getenv('interval')
+        self.namespace = os.getenv('namespace')
 
-    config.load_incluster_config()
+        config.load_incluster_config()
+        self.v1 = self.check_if_namespace_ok()
 
-    v1 = client.CoreV1Api()
-    namespaces = v1.list_namespace(watch=False)
-    ns = [x.metadata.name for x in namespaces.items]
-    if namespace not in ns:
-        logging.warning(f"Namespace '{namespace}' doesn't exist in current cluster.")
-        exit()
+    def check_if_namespace_ok(self):
+        v1 = client.CoreV1Api()
+        namespaces = v1.list_namespace(watch=False)
+        ns = [x.metadata.name for x in namespaces.items]
+        if self.namespace not in ns:
+            msg = f"Namespace '{self.namespace}' doesn't exist in current cluster."
+            logging.warning(msg)
+            raise Exception(msg)
+        return v1
 
-    serve_metrics()
-
-    while True:
+    def run(self):
         try:
-            ret = v1.list_namespaced_pod(namespace=namespace, watch=False)
+            ret = self.v1.list_namespaced_pod(namespace=self.namespace, watch=False)
         except (urllib3.exceptions.NewConnectionError, ConnectionRefusedError):
-            logger.warning(f"No pods running in namespace '{namespace}'. Terminating chaos monkey...")
-            break
+            logger.warning(f"No pods running in namespace '{self.namespace}'. Terminating chaos monkey...")
+            return
 
         if not ret.items:
-            logger.warning(f"No pods running in namespace '{namespace}'. Terminating chaos monkey...")
-            break
+            logger.warning(f"No pods running in namespace '{self.namespace}'. Terminating chaos monkey...")
+            return
 
         pod = random.choice(ret.items)
-        c.labels(podlabel=pod.metadata.labels['app.kubernetes.io/name']).inc()
+        self.c.labels(podlabel=pod.metadata.labels['app.kubernetes.io/name']).inc()
         pod_name = pod.metadata.name
 
         logger.info(f"Turning off pod '{pod_name}'")
 
-        out = v1.delete_namespaced_pod(pod.metadata.name, namespace)
+        self.v1.delete_namespaced_pod(pod.metadata.name, self.namespace)
         logger.info(f"Pod '{pod_name}' turned off")
 
-        sleep(int(interval) * 60)
+    def get_wait_time(self):
+        return int(self.interval) * 60
+
+
+if __name__ == "__main__":
+
+    cm = ChaosMonkey()
+    serve_metrics()
+
+    while True:
+        cm.run()
+        sleep(cm.get_wait_time())
